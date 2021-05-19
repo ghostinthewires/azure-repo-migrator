@@ -339,7 +339,7 @@ if($pushRepos){
     if(Test-Path $localrepo){
       Write-Output "Pushing local bare repo $($repo.name).git to $($repo.sshUrl)"
       Set-Location $localrepo
-      git push --mirror ($repo.webUrl -replace "://","://$($destOrg):$destPAT@")
+      git push --mirror ($repo.webUrl -replace "://","://$($destUsername):$destPAT@")
       Write-Output ""
     } else {
       Out-ErrorLog "Local repo not found: $localrepo"
