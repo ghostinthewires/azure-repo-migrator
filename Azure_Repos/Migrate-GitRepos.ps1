@@ -96,6 +96,14 @@ function Invoke-AzureDevOpsAPI {
   if($Project){
     $Org += "/$Project"
   }
+  
+  if ($Org -like 'https://*') {
+    $FinalOrgBase = $Org;
+  }
+  else
+  {
+    $FinalOrgBase = "https://dev.azure.com/${Org}"
+  }
 
   $headers = Get-BasicAuthHeader $Username $PAT
   if($HTTPMethod -eq "GET"){
@@ -103,10 +111,10 @@ function Invoke-AzureDevOpsAPI {
     if($Parameters.Keys){
       $Parameters.Keys | ForEach-Object { $queryString += $_ + "=" + $Parameters[$_] + "&" }
     }
-    return Invoke-WebRequest "https://dev.azure.com/${Org}/_apis/${Function}?${queryString}api-version=${APIVersion}" -UseBasicParsing -Headers $Headers -Method GET -Body $Body -ContentType $ContentType
+    return Invoke-WebRequest "${FinalOrgBase}/_apis/${Function}?${queryString}api-version=${APIVersion}" -UseBasicParsing -Headers $Headers -Method GET -Body $Body -ContentType $ContentType
   }
 
-  return Invoke-WebRequest "https://dev.azure.com/${Org}/_apis/${Function}?api-version=${APIVersion}" -UseBasicParsing -Headers $Headers -Method $HTTPMethod -Body $Body -ContentType $ContentType
+  return Invoke-WebRequest "${FinalOrgBase}/_apis/${Function}?api-version=${APIVersion}" -UseBasicParsing -Headers $Headers -Method $HTTPMethod -Body $Body -ContentType $ContentType
 
 }
 
@@ -128,10 +136,18 @@ function Invoke-AzureDevOpsWikiAPI {
     $Org += "/$Project"
   }
 
+  if ($Org -like 'https://*') {
+    $FinalOrgBase = $Org;
+  }
+  else
+  {
+    $FinalOrgBase = "https://dev.azure.com/${Org}"
+  }
+  
   $headers = Get-BasicAuthHeader $Username $PAT
 
 
-  return Invoke-WebRequest "https://dev.azure.com/${Org}/_apis/${Function}" -UseBasicParsing -Headers $Headers -Method $HTTPMethod -Body $Body -ContentType $ContentType
+  return Invoke-WebRequest "${FinalOrgBase}/_apis/${Function}" -UseBasicParsing -Headers $Headers -Method $HTTPMethod -Body $Body -ContentType $ContentType
 
 }
 
