@@ -283,7 +283,7 @@ if($cloneRepos){
     }
     else{
       Write-Output "Cloning new repository $localrepo"
-      git clone --bare ($repo.webUrl -replace "://","://$($sourceOrg):$sourcePAT@") $localrepo | Out-Null
+      git clone --bare ($repo.webUrl -replace "://","://$($sourceUsername):$sourcePAT@") $localrepo | Out-Null
     }
     Write-Output ""
   }
