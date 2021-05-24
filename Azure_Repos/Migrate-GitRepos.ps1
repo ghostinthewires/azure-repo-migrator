@@ -11,6 +11,7 @@ param(
   [switch]$cloneRepos,
   [switch]$createRemotes,
   [switch]$createForks,
+  [switch]$createPullRequests,
   [switch]$pushRepos
 )
 
@@ -79,6 +80,48 @@ function CreateRepo {
 
 }
 
+function CreatePullRequest {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)][String]$RepoId,
+    [Parameter(mandatory=$true)]$PullRequest
+  )
+
+  $body = $PullRequest | ConvertTo-JSON
+
+  try{
+    Write-Output "Creating pull request '$Org/$Project/$RepoId/$($PullRequest.pullRequestId)'"
+    Invoke-AzureDevOpsAPI -Org $Org -Function "git/repositories/$RepoId/pullrequests" -Username $Username -PAT $PAT -HTTPMethod "POST" -Body $body -ErrorAction SilentlyContinue | Out-Null
+  } catch {
+    Out-ErrorLog ($_.ErrorDetails.Message | ConvertFrom-Json).message
+  }
+
+}
+
+function CreateGitMerge {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)][String]$RepoId,
+    [Parameter(mandatory=$true)]$GitMerge
+  )
+
+  $body = $GitMerge | ConvertTo-JSON
+
+  try{
+    Write-Output "Creating git merge '$Org/$Project/$RepoId/$($GitMerge.mergeOperationId)'"
+    return Invoke-AzureDevOpsAPI -Org $Org -Function "git/repositories/$RepoId/merges" -Username $Username -PAT $PAT -HTTPMethod "POST" -Body $body -ErrorAction SilentlyContinue | Out-Null
+  } catch {
+    Out-ErrorLog ($_.ErrorDetails.Message | ConvertFrom-Json).message
+  }
+
+}
+
 function Invoke-AzureDevOpsAPI {
   param(
     $Username,
@@ -111,6 +154,7 @@ function Invoke-AzureDevOpsAPI {
     if($Parameters.Keys){
       $Parameters.Keys | ForEach-Object { $queryString += $_ + "=" + $Parameters[$_] + "&" }
     }
+    Write-Warning "${FinalOrgBase}/_apis/${Function}?${queryString}api-version=${APIVersion}"
     return Invoke-WebRequest "${FinalOrgBase}/_apis/${Function}?${queryString}api-version=${APIVersion}" -UseBasicParsing -Headers $Headers -Method GET -Body $Body -ContentType $ContentType
   }
 
@@ -212,6 +256,48 @@ function GetProjectId {
   return $response.id
 }
 
+function GetPullRequests {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT
+  )
+
+  $parameters = @{}
+  $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/pullrequests" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
+  return $response.value
+}
+
+function GetPullRequest {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)][Number]$PullRequestId
+  )
+
+  $parameters = @{}
+  $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/pullrequests/$PullRequestId" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
+  return $response
+}
+
+function GetGitMerge {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)]$RepoIdOrName,
+    [Parameter(mandatory=$true)]$MergeId
+  )
+
+  $parameters = @{}
+  $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/repositories/$RepoIdOrName/merges/$MergeId" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
+  return $response
+}
+
 function GetRepoId {
   param (
     [Parameter(mandatory=$true)][String]$Org,
@@ -221,9 +307,21 @@ function GetRepoId {
     [Parameter(mandatory=$true)][String]$repoName
   )
 
-  $parameters = @{includeParent="false"}
+  return (GetRepo -Org $Org -Project $Project -Username $Username -PAT $PAT -RepoName $repoName).id
+}
+
+function GetRepo {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)][String]$repoName
+  )
+
+  $parameters = @{includeParent="true"}
   $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/repositories/${repoName}" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
-  return $response.id
+  return $response
 }
 
 function ListRepos {
@@ -344,6 +442,46 @@ if($pushRepos){
     } else {
       Out-ErrorLog "Local repo not found: $localrepo"
     }
+  }
+}
+
+if($createPullRequests){
+  Write-Banner @"
+Creating pull requests on '$destOrg/$destProject' from '$sourceOrg/$sourceProject'
+"@
+
+  $sourcePullRequests = GetPullRequests -Org $sourceOrg -Project $sourceProject -PAT $sourcePAT -Username $sourceUsername
+
+  if(@($sourcePullRequests).length -gt 0){
+    foreach($pr in $sourcePullRequests){
+
+      Write-Output "Fetching source merge $($pr.mergeId).."
+      $sourceMerge = GetGitMerge -Org $SourceOrg -Project $pr.repository.project.id -Username $sourceUsername -PAT $sourcePAT -RepoIdOrName $pr.repository.name -MergeId $pr.mergeId
+      
+      $sourcePRID = $pr.pullRequestId
+      $pr.PSObject.Properties.Remove('url')
+      $pr.PSObject.Properties.Remove('_links')
+      $pr.lastMergeCommit.PSObject.Properties.Remove('url')
+      $pr.lastMergeTargetCommit.PSObject.Properties.Remove('url')
+      $pr.lastMergeSourceCommit.PSObject.Properties.Remove('url')
+      $pr.PSObject.Properties.Remove('pullRequestId')
+      $pr.PSObject.Properties.Remove('codeReviewId')
+      
+      $targetRepo = GetRepo -Org $DestOrg -Project $pr.repository.project.id -Username $DestUsername -PAT $destPAT -repoName $pr.repository.name
+
+      $pr.repository = $targetRepo
+      
+      $targetMerge = CreateGitMerge -Org $destOrg -Project $destProject -PAT $destPAT -Username $destUsername -GitMerge $sourceMerge -RepoId $targetRepo.id
+
+      $pr.mergeId = $targetMerge.mergeOperationId;
+
+      Write-Output "Creating pull request $($targetRepo.name)/$($sourcePRID)"
+      CreatePullRequest -Org $destOrg -Project $destProject -PAT $destPAT -Username $destUsername -PullRequest $pr -RepoId $targetRepo.id
+      
+      Write-Output ""
+    }
+  } else {
+    Write-Warning "No pull requests found in $sourceOrg/$sourceProject"
   }
 }
 
