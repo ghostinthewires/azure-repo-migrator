@@ -7,6 +7,7 @@ param(
   [Parameter(mandatory=$true)][String]$destProject,
   [Parameter(mandatory=$false)][String]$destPAT,
   [Parameter(mandatory=$false)][String]$destUsername,
+  [Parameter(mandatory=$false)][String]$ReflectedWorkItemField = "Custom.ReflectedWorkItemId",
   [switch]$clean,
   [switch]$cloneRepos,
   [switch]$createRemotes,
@@ -93,29 +94,30 @@ function CreatePullRequest {
   $body = $PullRequest | ConvertTo-JSON
 
   try{
-    Write-Output "Creating pull request '$Org/$Project/$RepoId/$($PullRequest.pullRequestId)'"
-    Invoke-AzureDevOpsAPI -Org $Org -Function "git/repositories/$RepoId/pullrequests" -Username $Username -PAT $PAT -HTTPMethod "POST" -Body $body -ErrorAction SilentlyContinue | Out-Null
+    Write-Host "Creating pull request '$Org/$Project/$RepoId/$($PullRequest.pullRequestId)'"
+    return (Invoke-AzureDevOpsAPI -Org $Org -Function "git/repositories/$RepoId/pullrequests" -Username $Username -PAT $PAT -HTTPMethod "POST" -Body $body -ErrorAction SilentlyContinue).Content | ConvertFrom-Json
   } catch {
     Out-ErrorLog ($_.ErrorDetails.Message | ConvertFrom-Json).message
   }
 
 }
 
-function CreateGitMerge {
+function CreatePullRequestThread {
   param (
     [Parameter(mandatory=$true)][String]$Org,
     [Parameter(mandatory=$true)][String]$Project,
     [Parameter(mandatory=$true)][String]$Username,
     [Parameter(mandatory=$true)][String]$PAT,
     [Parameter(mandatory=$true)][String]$RepoId,
-    [Parameter(mandatory=$true)]$GitMerge
+    [Parameter(mandatory=$true)]$PullRequestId,
+    [Parameter(mandatory=$true)]$PullRequestThread
   )
 
-  $body = $GitMerge | ConvertTo-JSON
+  $body = $PullRequestThread | ConvertTo-JSON
 
   try{
-    Write-Output "Creating git merge '$Org/$Project/$RepoId/$($GitMerge.mergeOperationId)'"
-    return Invoke-AzureDevOpsAPI -Org $Org -Function "git/repositories/$RepoId/merges" -Username $Username -PAT $PAT -HTTPMethod "POST" -Body $body -ErrorAction SilentlyContinue | Out-Null
+    Write-Output "Creating PR Thread '$Org/$Project/$RepoId/$PullRequestId'"
+    return (Invoke-AzureDevOpsAPI -Org $Org -Function "git/repositories/$RepoId/pullrequests/$PullRequestId/threads" -Username $Username -PAT $PAT -HTTPMethod "POST" -Body $body -ErrorAction SilentlyContinue).Content | ConvertFrom-Json
   } catch {
     Out-ErrorLog ($_.ErrorDetails.Message | ConvertFrom-Json).message
   }
@@ -154,10 +156,10 @@ function Invoke-AzureDevOpsAPI {
     if($Parameters.Keys){
       $Parameters.Keys | ForEach-Object { $queryString += $_ + "=" + $Parameters[$_] + "&" }
     }
-    Write-Warning "${FinalOrgBase}/_apis/${Function}?${queryString}api-version=${APIVersion}"
+    Write-Debug "${FinalOrgBase}/_apis/${Function}?${queryString}api-version=${APIVersion}"
     return Invoke-WebRequest "${FinalOrgBase}/_apis/${Function}?${queryString}api-version=${APIVersion}" -UseBasicParsing -Headers $Headers -Method GET -Body $Body -ContentType $ContentType
   }
-
+    Write-Debug "${FinalOrgBase}/_apis/${Function}?${queryString}api-version=${APIVersion}"
   return Invoke-WebRequest "${FinalOrgBase}/_apis/${Function}?api-version=${APIVersion}" -UseBasicParsing -Headers $Headers -Method $HTTPMethod -Body $Body -ContentType $ContentType
 
 }
@@ -283,19 +285,51 @@ function GetPullRequest {
   return $response
 }
 
-function GetGitMerge {
+function GetPullRequestThreads {
   param (
     [Parameter(mandatory=$true)][String]$Org,
     [Parameter(mandatory=$true)][String]$Project,
     [Parameter(mandatory=$true)][String]$Username,
     [Parameter(mandatory=$true)][String]$PAT,
     [Parameter(mandatory=$true)]$RepoIdOrName,
-    [Parameter(mandatory=$true)]$MergeId
+    [Parameter(mandatory=$true)]$PullRequestId
   )
 
   $parameters = @{}
-  $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/repositories/$RepoIdOrName/merges/$MergeId" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
-  return $response
+  $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/repositories/$RepoIdOrName/pullrequests/$PullRequestId/threads" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
+  return $response.value
+}
+
+function GetWorkReflectedWorkItem {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)]$WorkItemUrl
+  )
+
+  $parameters = @{}
+  $response = Invoke-AzureDevOpsAPI -HTTPMethod "POST" -Body (@{query = "select [System.Id] from WorkItems where [$ReflectedWorkItemField] = '$WorkItemUrl'"} | ConvertTo-JSON ) -Org $Org -Project $Project -Function "wit/wiql" -Parameters $parameters -Username $Username -PAT $PAT
+  $response = $response | ConvertFrom-Json
+  if ($null -ne $response.workItems -and $response.workItems.Count -gt 1) {
+    Write-Warning "Found multiple work items with reflected work item reference $WorkItemUrl."
+  }
+  return $response.workItems | Select-Object -First 1
+}
+
+function GetPullRequestWorkItems {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)]$RepoIdOrName,
+    [Parameter(mandatory=$true)]$PullRequestId
+  )
+
+  $parameters = @{}
+  $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/repositories/$RepoIdOrName/pullrequests/$PullRequestId/workitems" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
+  return $response.value
 }
 
 function GetRepoId {
@@ -456,9 +490,11 @@ Creating pull requests on '$destOrg/$destProject' from '$sourceOrg/$sourceProjec
     foreach($pr in $sourcePullRequests){
 
       Write-Output "Fetching source merge $($pr.mergeId).."
-      $sourceMerge = GetGitMerge -Org $SourceOrg -Project $pr.repository.project.id -Username $sourceUsername -PAT $sourcePAT -RepoIdOrName $pr.repository.name -MergeId $pr.mergeId
+      $sourceThreads = GetPullRequestThreads -Org $SourceOrg -Project $pr.repository.project.id -Username $sourceUsername -PAT $sourcePAT -RepoIdOrName $pr.repository.name -PullRequestId $pr.pullRequestId
+      $sourceWorkItems = GetPullRequestWorkItems -Org $SourceOrg -Project $pr.repository.project.id -Username $sourceUsername -PAT $sourcePAT -RepoIdOrName $pr.repository.name -PullRequestId $pr.pullRequestId
       
       $sourcePRID = $pr.pullRequestId
+      $sourcePRUrl = $pr.url
       $pr.PSObject.Properties.Remove('url')
       $pr.PSObject.Properties.Remove('_links')
       $pr.lastMergeCommit.PSObject.Properties.Remove('url')
@@ -467,16 +503,67 @@ Creating pull requests on '$destOrg/$destProject' from '$sourceOrg/$sourceProjec
       $pr.PSObject.Properties.Remove('pullRequestId')
       $pr.PSObject.Properties.Remove('codeReviewId')
       
-      $targetRepo = GetRepo -Org $DestOrg -Project $pr.repository.project.id -Username $DestUsername -PAT $destPAT -repoName $pr.repository.name
+      $targetRepo = GetRepo -Org $DestOrg -Project $destProject -Username $DestUsername -PAT $destPAT -repoName $pr.repository.name
 
       $pr.repository = $targetRepo
-      
-      $targetMerge = CreateGitMerge -Org $destOrg -Project $destProject -PAT $destPAT -Username $destUsername -GitMerge $sourceMerge -RepoId $targetRepo.id
 
       $pr.mergeId = $targetMerge.mergeOperationId;
 
+      $pr | Add-Member -MemberType NoteProperty -Name "workItemRefs" -Value @()
+
+      foreach ($wi in $sourceWorkItems) {
+        Write-Output "Fetching work item ref $($wi.id) on PR $($targetRepo.name)/$($sourcePRID)"
+        $reflectedWi = GetWorkReflectedWorkItem -Org $destOrg -PAT $destPAT -Username $destUsername -WorkItemUrl $wi.url
+        if ($null -ne $reflectedWi) {
+          $pr.workItemRefs += $reflectedWi
+          Write-Output "Attaching work item reference [$($reflectedWi.id)]."
+        }
+        else 
+        {
+          Write-Warning "Could not locate the referenced work item [$($wi.id)] in target org."
+        }
+      }
+
       Write-Output "Creating pull request $($targetRepo.name)/$($sourcePRID)"
-      CreatePullRequest -Org $destOrg -Project $destProject -PAT $destPAT -Username $destUsername -PullRequest $pr -RepoId $targetRepo.id
+      $targetPr = CreatePullRequest -Org $destOrg -Project $destProject -PAT $destPAT -Username $destUsername -PullRequest $pr -RepoId $targetRepo.id
+
+      if ($null -eq $targetPr) {
+        Write-Error "Failed to create pull request $($sourcePRID)!"
+        continue
+      }
+
+      Write-Output "Pull request $sourcePRID -> $($targetPr.pullRequestId) has been created."
+
+      if ($null -eq $sourceThreads) {
+        $sourceThreads = @()
+      }
+      
+      $sourceThreads += [PSCustomObject]@{
+        "properties" = [PSCustomObject]@{
+          "Microsoft.TeamFoundation.Discussion.SupportsMarkdown" = @{
+              "`$type" = "System.Int32"
+              "`$value" = 1
+          }
+          "Microsoft.TeamFoundation.Discussion.UniqueID" = @{
+            "`$type" = "System.String"
+            "`$value" = [System.Guid]::NewGuid().ToString()
+          }
+        }
+        "status" = "closed"
+        "comments" = @([PSCustomObject]@{
+          "parentCommentId" = 0
+          "commentType" = "system"
+          "content" = "Pull request migrated from [PR $sourcePRID]($sourcePRUrl)."
+        })
+      }
+
+      foreach ($thread in $sourceThreads) {
+        Write-Output "Creating a pull request thread $($targetRepo.name)/$($sourcePRID)"
+        $thread.PSObject.Properties.Remove('id')
+        $thread.PSObject.Properties.Remove('url')
+        $thread.PSObject.Properties.Remove('_links')
+        $targetThread = CreatePullRequestThread -Org $destOrg -Project $destProject -PAT $destPAT -Username $destUsername -PullRequestThread $thread -RepoId $targetRepo.id -PullRequestId $targetPr.pullRequestId
+      }
       
       Write-Output ""
     }
