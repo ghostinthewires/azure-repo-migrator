@@ -7,10 +7,12 @@ param(
   [Parameter(mandatory=$true)][String]$destProject,
   [Parameter(mandatory=$false)][String]$destPAT,
   [Parameter(mandatory=$false)][String]$destUsername,
+  [Parameter(mandatory=$false)][String]$ReflectedWorkItemField = "Custom.ReflectedWorkItemId",
   [switch]$clean,
   [switch]$cloneRepos,
   [switch]$createRemotes,
   [switch]$createForks,
+  [switch]$createPullRequests,
   [switch]$pushRepos
 )
 
@@ -79,6 +81,49 @@ function CreateRepo {
 
 }
 
+function CreatePullRequest {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)][String]$RepoId,
+    [Parameter(mandatory=$true)]$PullRequest
+  )
+
+  $body = $PullRequest | ConvertTo-JSON
+
+  try{
+    Write-Host "Creating pull request '$Org/$Project/$RepoId/$($PullRequest.pullRequestId)'"
+    return (Invoke-AzureDevOpsAPI -Org $Org -Function "git/repositories/$RepoId/pullrequests" -Username $Username -PAT $PAT -HTTPMethod "POST" -Body $body -ErrorAction SilentlyContinue).Content | ConvertFrom-Json
+  } catch {
+    Out-ErrorLog ($_.ErrorDetails.Message | ConvertFrom-Json).message
+  }
+
+}
+
+function CreatePullRequestThread {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)][String]$RepoId,
+    [Parameter(mandatory=$true)]$PullRequestId,
+    [Parameter(mandatory=$true)]$PullRequestThread
+  )
+
+  $body = $PullRequestThread | ConvertTo-JSON
+
+  try{
+    Write-Output "Creating PR Thread '$Org/$Project/$RepoId/$PullRequestId'"
+    return (Invoke-AzureDevOpsAPI -Org $Org -Function "git/repositories/$RepoId/pullrequests/$PullRequestId/threads" -Username $Username -PAT $PAT -HTTPMethod "POST" -Body $body -ErrorAction SilentlyContinue).Content | ConvertFrom-Json
+  } catch {
+    Out-ErrorLog ($_.ErrorDetails.Message | ConvertFrom-Json).message
+  }
+
+}
+
 function Invoke-AzureDevOpsAPI {
   param(
     $Username,
@@ -96,6 +141,14 @@ function Invoke-AzureDevOpsAPI {
   if($Project){
     $Org += "/$Project"
   }
+  
+  if ($Org -like 'https://*') {
+    $FinalOrgBase = $Org;
+  }
+  else
+  {
+    $FinalOrgBase = "https://dev.azure.com/${Org}"
+  }
 
   $headers = Get-BasicAuthHeader $Username $PAT
   if($HTTPMethod -eq "GET"){
@@ -103,10 +156,11 @@ function Invoke-AzureDevOpsAPI {
     if($Parameters.Keys){
       $Parameters.Keys | ForEach-Object { $queryString += $_ + "=" + $Parameters[$_] + "&" }
     }
-    return Invoke-WebRequest "https://dev.azure.com/${Org}/_apis/${Function}?${queryString}api-version=${APIVersion}" -UseBasicParsing -Headers $Headers -Method GET -Body $Body -ContentType $ContentType
+    Write-Debug "${FinalOrgBase}/_apis/${Function}?${queryString}api-version=${APIVersion}"
+    return Invoke-WebRequest "${FinalOrgBase}/_apis/${Function}?${queryString}api-version=${APIVersion}" -UseBasicParsing -Headers $Headers -Method GET -Body $Body -ContentType $ContentType
   }
-
-  return Invoke-WebRequest "https://dev.azure.com/${Org}/_apis/${Function}?api-version=${APIVersion}" -UseBasicParsing -Headers $Headers -Method $HTTPMethod -Body $Body -ContentType $ContentType
+    Write-Debug "${FinalOrgBase}/_apis/${Function}?${queryString}api-version=${APIVersion}"
+  return Invoke-WebRequest "${FinalOrgBase}/_apis/${Function}?api-version=${APIVersion}" -UseBasicParsing -Headers $Headers -Method $HTTPMethod -Body $Body -ContentType $ContentType
 
 }
 
@@ -128,10 +182,18 @@ function Invoke-AzureDevOpsWikiAPI {
     $Org += "/$Project"
   }
 
+  if ($Org -like 'https://*') {
+    $FinalOrgBase = $Org;
+  }
+  else
+  {
+    $FinalOrgBase = "https://dev.azure.com/${Org}"
+  }
+  
   $headers = Get-BasicAuthHeader $Username $PAT
 
 
-  return Invoke-WebRequest "https://dev.azure.com/${Org}/_apis/${Function}" -UseBasicParsing -Headers $Headers -Method $HTTPMethod -Body $Body -ContentType $ContentType
+  return Invoke-WebRequest "${FinalOrgBase}/_apis/${Function}" -UseBasicParsing -Headers $Headers -Method $HTTPMethod -Body $Body -ContentType $ContentType
 
 }
 
@@ -196,6 +258,80 @@ function GetProjectId {
   return $response.id
 }
 
+function GetPullRequests {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT
+  )
+
+  $parameters = @{}
+  $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/pullrequests" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
+  return $response.value
+}
+
+function GetPullRequest {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)][Number]$PullRequestId
+  )
+
+  $parameters = @{}
+  $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/pullrequests/$PullRequestId" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
+  return $response
+}
+
+function GetPullRequestThreads {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)]$RepoIdOrName,
+    [Parameter(mandatory=$true)]$PullRequestId
+  )
+
+  $parameters = @{}
+  $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/repositories/$RepoIdOrName/pullrequests/$PullRequestId/threads" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
+  return $response.value
+}
+
+function GetWorkReflectedWorkItem {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)]$WorkItemUrl
+  )
+
+  $parameters = @{}
+  $response = Invoke-AzureDevOpsAPI -HTTPMethod "POST" -Body (@{query = "select [System.Id] from WorkItems where [$ReflectedWorkItemField] = '$WorkItemUrl'"} | ConvertTo-JSON ) -Org $Org -Project $Project -Function "wit/wiql" -Parameters $parameters -Username $Username -PAT $PAT
+  $response = $response | ConvertFrom-Json
+  if ($null -ne $response.workItems -and $response.workItems.Count -gt 1) {
+    Write-Warning "Found multiple work items with reflected work item reference $WorkItemUrl."
+  }
+  return $response.workItems | Select-Object -First 1
+}
+
+function GetPullRequestWorkItems {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)]$RepoIdOrName,
+    [Parameter(mandatory=$true)]$PullRequestId
+  )
+
+  $parameters = @{}
+  $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/repositories/$RepoIdOrName/pullrequests/$PullRequestId/workitems" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
+  return $response.value
+}
+
 function GetRepoId {
   param (
     [Parameter(mandatory=$true)][String]$Org,
@@ -205,9 +341,21 @@ function GetRepoId {
     [Parameter(mandatory=$true)][String]$repoName
   )
 
-  $parameters = @{includeParent="false"}
+  return (GetRepo -Org $Org -Project $Project -Username $Username -PAT $PAT -RepoName $repoName).id
+}
+
+function GetRepo {
+  param (
+    [Parameter(mandatory=$true)][String]$Org,
+    [Parameter(mandatory=$true)][String]$Project,
+    [Parameter(mandatory=$true)][String]$Username,
+    [Parameter(mandatory=$true)][String]$PAT,
+    [Parameter(mandatory=$true)][String]$repoName
+  )
+
+  $parameters = @{includeParent="true"}
   $response = Invoke-AzureDevOpsAPI -Org $Org -Project $Project -Function "git/repositories/${repoName}" -Parameters $parameters -Username $Username -PAT $PAT | ConvertFrom-Json
-  return $response.id
+  return $response
 }
 
 function ListRepos {
@@ -267,7 +415,7 @@ if($cloneRepos){
     }
     else{
       Write-Output "Cloning new repository $localrepo"
-      git clone --bare ($repo.webUrl -replace "://","://$($sourceOrg):$sourcePAT@") $localrepo | Out-Null
+      git clone --bare ($repo.webUrl -replace "://","://$($sourceUsername):$sourcePAT@") $localrepo | Out-Null
     }
     Write-Output ""
   }
@@ -323,11 +471,104 @@ if($pushRepos){
     if(Test-Path $localrepo){
       Write-Output "Pushing local bare repo $($repo.name).git to $($repo.sshUrl)"
       Set-Location $localrepo
-      git push --mirror ($repo.webUrl -replace "://","://$($destOrg):$destPAT@")
+      git push --mirror ($repo.webUrl -replace "://","://$($destUsername):$destPAT@")
       Write-Output ""
     } else {
       Out-ErrorLog "Local repo not found: $localrepo"
     }
+  }
+}
+
+if($createPullRequests){
+  Write-Banner @"
+Creating pull requests on '$destOrg/$destProject' from '$sourceOrg/$sourceProject'
+"@
+
+  $sourcePullRequests = GetPullRequests -Org $sourceOrg -Project $sourceProject -PAT $sourcePAT -Username $sourceUsername
+
+  if(@($sourcePullRequests).length -gt 0){
+    foreach($pr in $sourcePullRequests){
+
+      Write-Output "Fetching source merge $($pr.mergeId).."
+      $sourceThreads = GetPullRequestThreads -Org $SourceOrg -Project $pr.repository.project.id -Username $sourceUsername -PAT $sourcePAT -RepoIdOrName $pr.repository.name -PullRequestId $pr.pullRequestId
+      $sourceWorkItems = GetPullRequestWorkItems -Org $SourceOrg -Project $pr.repository.project.id -Username $sourceUsername -PAT $sourcePAT -RepoIdOrName $pr.repository.name -PullRequestId $pr.pullRequestId
+      
+      $sourcePRID = $pr.pullRequestId
+      $sourcePRUrl = $pr.url
+      $pr.PSObject.Properties.Remove('url')
+      $pr.PSObject.Properties.Remove('_links')
+      $pr.lastMergeCommit.PSObject.Properties.Remove('url')
+      $pr.lastMergeTargetCommit.PSObject.Properties.Remove('url')
+      $pr.lastMergeSourceCommit.PSObject.Properties.Remove('url')
+      $pr.PSObject.Properties.Remove('pullRequestId')
+      $pr.PSObject.Properties.Remove('codeReviewId')
+      
+      $targetRepo = GetRepo -Org $DestOrg -Project $destProject -Username $DestUsername -PAT $destPAT -repoName $pr.repository.name
+
+      $pr.repository = $targetRepo
+
+      $pr.mergeId = $targetMerge.mergeOperationId;
+
+      $pr | Add-Member -MemberType NoteProperty -Name "workItemRefs" -Value @()
+
+      foreach ($wi in $sourceWorkItems) {
+        Write-Output "Fetching work item ref $($wi.id) on PR $($targetRepo.name)/$($sourcePRID)"
+        $reflectedWi = GetWorkReflectedWorkItem -Org $destOrg -PAT $destPAT -Username $destUsername -WorkItemUrl $wi.url
+        if ($null -ne $reflectedWi) {
+          $pr.workItemRefs += $reflectedWi
+          Write-Output "Attaching work item reference [$($reflectedWi.id)]."
+        }
+        else 
+        {
+          Write-Warning "Could not locate the referenced work item [$($wi.id)] in target org."
+        }
+      }
+
+      Write-Output "Creating pull request $($targetRepo.name)/$($sourcePRID)"
+      $targetPr = CreatePullRequest -Org $destOrg -Project $destProject -PAT $destPAT -Username $destUsername -PullRequest $pr -RepoId $targetRepo.id
+
+      if ($null -eq $targetPr) {
+        Write-Error "Failed to create pull request $($sourcePRID)!"
+        continue
+      }
+
+      Write-Output "Pull request $sourcePRID -> $($targetPr.pullRequestId) has been created."
+
+      if ($null -eq $sourceThreads) {
+        $sourceThreads = @()
+      }
+      
+      $sourceThreads += [PSCustomObject]@{
+        "properties" = [PSCustomObject]@{
+          "Microsoft.TeamFoundation.Discussion.SupportsMarkdown" = @{
+              "`$type" = "System.Int32"
+              "`$value" = 1
+          }
+          "Microsoft.TeamFoundation.Discussion.UniqueID" = @{
+            "`$type" = "System.String"
+            "`$value" = [System.Guid]::NewGuid().ToString()
+          }
+        }
+        "status" = "closed"
+        "comments" = @([PSCustomObject]@{
+          "parentCommentId" = 0
+          "commentType" = "system"
+          "content" = "Pull request migrated from [PR $sourcePRID]($sourcePRUrl)."
+        })
+      }
+
+      foreach ($thread in $sourceThreads) {
+        Write-Output "Creating a pull request thread $($targetRepo.name)/$($sourcePRID)"
+        $thread.PSObject.Properties.Remove('id')
+        $thread.PSObject.Properties.Remove('url')
+        $thread.PSObject.Properties.Remove('_links')
+        $targetThread = CreatePullRequestThread -Org $destOrg -Project $destProject -PAT $destPAT -Username $destUsername -PullRequestThread $thread -RepoId $targetRepo.id -PullRequestId $targetPr.pullRequestId
+      }
+      
+      Write-Output ""
+    }
+  } else {
+    Write-Warning "No pull requests found in $sourceOrg/$sourceProject"
   }
 }
 
